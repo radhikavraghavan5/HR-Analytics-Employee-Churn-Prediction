@@ -1,0 +1,891 @@
+---
+title: "project 693A"
+output: pdf_document
+date: "2023-02-16"
+---
+
+```{r}
+library(pacman)
+
+p_load(janitor, ggcorrplot, RColorBrewer, ggthemes, cowplot, tidymodels, visdat, themis, crosstable, gmodels, naniar, DataExplorer, ROSE, discrim, glmnet, caret, keras, finetune, pROC, vip, tictoc)
+
+```
+
+```{r}
+# Reading the data in, and loading the data
+df <- read.csv("HR_clean.csv", na.strings = "", stringsAsFactors = TRUE) %>% 
+  clean_names()
+
+df
+```
+
+
+
+### Step1:- Cleaning data
+
+```{r}
+df_cleaned <- df %>% 
+  # dplyr::select(df, -c(employee_count, employee_number, 
+  #                      standard_hours, over18, application_id)) %>% 
+  mutate(education = as.factor(case_when(education == 1 ~ "Below College",
+                             education == 2 ~ "College",
+                             education == 3 ~ "Bachelors",
+                             education ==4 ~ "Masters",
+                             education ==5 ~ "Ph.D")),
+         department = recode_factor(department, "Research & Development" = "R&D", 
+                                                "Human Resources" = "HR"),
+         age_group = case_when(
+                                age > 17 & age <= 25 ~ "18-25",
+                                age > 25 & age <= 35 ~ "26-35",
+                                age > 35 & age <= 46 ~ "36-45",
+                                age > 45 & age <= 50 ~ "46-50",
+                                age > 50 & age <= 64 ~ "51-64",        
+                                age > 64             ~ "> 64"
+                                ),
+         attrition = as.factor(case_when(
+                                attrition == "Voluntary Resignation" ~ "Yes",
+                                attrition == "Current employee" ~ "No"
+                                )),
+    job_role = as.factor(job_role),
+    percent_salary_hike = as.integer(percent_salary_hike),
+    distance_from_home = as.integer(distance_from_home),
+    monthly_income = as.integer(monthly_income)
+    ) %>% 
+  drop_na()
+
+
+```
+
+
+```{r}
+# Identify factor columns in df_cleaned
+factor_cols <- sapply(df_cleaned, is.factor)
+
+# Remove "Other" and "Test" levels from all factor columns
+df_cleaned[factor_cols] <- lapply(df_cleaned[factor_cols], 
+                                  function(x) droplevels(x, 
+                                                         exclude = c("Other", "Test", "NA")))
+
+# Convert education_field to character
+df_cleaned$education_field <- as.character(df_cleaned$education_field)
+
+# Remove rows containing "NA"
+df_cleaned_new <- df_cleaned[!df_cleaned$education_field %in% "NA", ]
+
+# Remove rows with NAs
+df_cleaned_new <- drop_na(df_cleaned_new) %>% 
+  mutate(education_field = as.factor(education_field)) %>% 
+  dplyr::select(-c(num_companies_worked, total_working_years, years_with_curr_manager, years_in_current_role,  years_at_company, age_started_working, age, job_level, job_satisfaction, performance_rating))
+
+```
+
+```{r}
+# Check for duplicated records in the dataset
+duplicated_rows <- duplicated(df_cleaned_new)
+if (any(duplicated_rows)) {
+  print("The dataset contains duplicated rows")
+} else {
+  print("The dataset does not contain duplicated rows")
+}
+
+# Check for duplicated rows in the data frame
+duplicated_rows <- duplicated(df_cleaned_new)
+
+# Subset the data frame to exclude duplicated rows
+df_cleaned_new <- df_cleaned_new[!duplicated_rows, ]
+```
+
+
+```{r}
+table(df_cleaned_new$attrition)
+```
+
+
+```{r}
+# # Overview of summary (Turnover V.S. Non-turnover)
+# cor_vars <- df_cleaned_new[,c("job_satisfaction","percent_salary_hike","monthly_income","distance_from_home","years_at_company","years_since_last_promotion", "attrition")]
+# 
+# dt <- aggregate(cor_vars[,c("job_satisfaction","percent_salary_hike","monthly_income","distance_from_home","years_at_company","years_since_last_promotion")],
+#           by=list(Category=cor_vars$attrition),
+#           FUN=mean)
+
+```
+
+
+### **Bivariate analysis**
+
+```{r, fig.length = 3, fig.height=3}
+options(repr.plot.width=10, repr.plot.height=7) 
+
+nums <- select_if(df_cleaned_new, is.numeric)
+
+corr <- round(cor(nums), 1)
+
+ggcorrplot(corr, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           method="square", 
+           colors = c("red", "white", "#01A9DB"), 
+           title="Correlogram for Employee Attrition", 
+           ggtheme=theme_minimal())
+```
+
+
+#### Exploratory Data Analysis
+
+```{r, fig.width=5, fig.height=2}
+
+
+incom_by_gender_plt <-
+  df_cleaned_new %>% 
+  select(gender, monthly_income) %>%
+  group_by(gender) %>%
+  summarise(avg_income = round(mean(monthly_income), 2), .groups = "drop") %>%
+  ggplot(aes(x = gender, y = avg_income)) +
+  geom_col(aes(fill = gender), width = 0.3, show.legend = FALSE) +
+  geom_text(
+    aes(
+      x = gender,
+      y = 0.01,
+      label = dollar(avg_income, prefix = "USD  ")
+    ),
+    hjust = -0.2,
+    size = 4,
+    colour = "white",
+    fontface = "bold"
+  ) +
+  coord_flip() +
+  scale_y_continuous(labels = label_dollar()) +
+  scale_fill_manual(values = c("#E41AAC", "#00838F")) +
+  theme(plot.title = element_text(size = 14, hjust = 0.5)) +
+theme_set(theme_bw() + theme(plot.background = element_rect(fill = "transparent", color = "NA"))) +
+  labs(title = "Average Monthly Income 
+       by Gender",
+       x = NULL,
+       y = NULL)
+
+
+gender_by_department_plt <- 
+  df_cleaned_new %>%
+  group_by(department, gender) %>% 
+  summarise(amount = n(), .groups = "drop") %>%
+  ggplot(aes(
+    x = fct_reorder(department, amount),
+    y = amount,
+    fill = gender
+  )) + 
+  geom_col(position = "dodge") +
+  theme(axis.text.x = element_text(angle = 90),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "top") + 
+  scale_fill_manual(values = c("#E41AAC", "#00838F")) +
+  theme_set(theme_bw() + theme(plot.background = element_rect(fill = "transparent", color = "NA"))) +
+  labs(title = "Number of Employees by Department
+       and Gender",
+x = NULL,
+y = NULL,
+fill = NULL)
+
+
+employees_departments_plt <- 
+  df_cleaned_new %>% 
+  group_by(department) %>% 
+  summarise(amount = n()) %>%
+  mutate(prop = round(amount / sum(amount) * 100, 1),
+         ypos = cumsum(prop)- 0.5*prop ) %>%
+  ggplot(aes(x = "", y = prop, fill = department)) +
+  geom_col() +
+  coord_polar("y", start = 0) +
+  
+  geom_text(
+    aes(y = prop, label = str_c(prop, "%", sep = "")),
+    position = position_stack(vjust = 0.5),
+    size = 3,
+    col = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual (values = c("#0E8A41", "#0B2D5B", "#E4652E")) +
+  theme(legend.position = "top") +
+  theme_set(theme_bw() + theme(plot.background = element_rect(fill = "transparent", color = "NA"))) +
+
+  labs(
+    title = "Number of Employees by 
+    Department",
+    fill = NULL,
+    x = NULL,
+    y = NULL
+  )
+
+
+plot_grid(
+  plot_grid(employees_departments_plt, gender_by_department_plt, nrow = 1),
+  incom_by_gender_plt,
+  ncol = 2,
+  rel_widths = c(3, 1), # increase the relative width of the first plot
+  align = "h"  # align the plots horizontally
+) +
+  plot_annotation(
+    caption = "IBM HR Employee Attrition"
+  ) +
+  theme(plot.caption = element_text(color = "#969696", size = 3),
+        plot.title = element_text(size = 3)
+        ) 
+
+
+```
+
+```{r, fig.height=3}
+over_att_marital_status <- df_cleaned_new %>% select(over_time, attrition, marital_status) %>%
+  group_by(over_time, attrition, marital_status) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(prop = str_c(round(count / sum(count) * 100, 0), "%"),
+         label_vjust = case_when(
+                  count < quantile(count, probs = 0.3) ~ -0.5,
+                  TRUE ~ 1.5,
+                ), 
+         label_color = case_when(
+                  count < quantile(count, probs = 0.3) ~ "black",
+                  TRUE ~ "white",
+                ))
+
+
+ggplot(over_att_marital_status, aes(x = marital_status, y = count, fill = over_time)) +
+  geom_col(width = 0.8,
+           color = "#FAFACD"
+           ) +
+  geom_text(show.legend = FALSE,
+    aes(label = prop, 
+        vjust = label_vjust,
+        color = label_color),
+    size = 4,
+    fontface = "bold"
+  ) +
+  facet_wrap(vars(str_c("Attrition", attrition, sep =  " ") ,
+                  str_c("Over-Time", over_time, sep = " ")),
+             scales = "free_x") +
+  scale_fill_manual (values = c("#881593", "#0052CA")) +
+  scale_color_manual (values = c("black", "white")) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text = element_text(face = "bold", size = 11)) +
+   # theme(
+   #      legend.position = "none",
+   #      strip.background = element_rect(fill = "#BB0E0A"),
+   #      strip.text = element_text(color = "#FFF6D8", face = "bold", size = 11),
+   #      axis.text.x = element_text(angle = 75, hjust = 1),
+   #      plot.background = element_rect(fill = "#FFF1B2")) +
+  labs(
+    title = "Over-time distributions by Marital Status and Attrition",
+    subtitle = "Column Plot, proportion of YES to NO in over-time Var",
+    caption = "IBM HR Employee Attrition",
+    x= "Education Feild",
+    y = "Count"
+    )
+```
+
+```{r, fig.height=3}
+over_att_gender <- df_cleaned_new %>% select(over_time, attrition, education_field) %>%
+  group_by(over_time, attrition, education_field) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(prop = str_c(round(count / sum(count) * 100, 0), "%"),
+         label_vjust = case_when(
+                  count < quantile(count, probs = 0.4) ~ -0.5,
+                  TRUE ~ 1.5,
+                ), 
+         label_color = case_when(
+                  count < quantile(count, probs = 0.4) ~ "black",
+                  TRUE ~ "white",
+                ))
+
+
+ggplot(over_att_gender, aes(x = education_field, y = count, fill = over_time)) +
+  geom_col(width = 0.8,
+           color = "#FAFACD"
+           ) +
+  geom_text(show.legend = FALSE,
+    aes(label = prop, 
+        vjust = label_vjust,
+        color = label_color),
+    size = 4,
+    fontface = "bold"
+  ) +
+  facet_wrap(vars(str_c("Attrition", attrition, sep =  " ") ,
+                  str_c("Over-Time", over_time, sep = " ")),
+             scales = "free_x") +
+  scale_fill_manual (values = c("#881593", "#0052CA")) +
+  scale_color_manual (values = c("black", "white")) +
+   theme(panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text = element_text(face = "bold", size = 11)) +
+  labs(
+    title = "Over-time distributions by Education Field and Attrition",
+    subtitle = "Column Plot, proportion of YES to NO in over-time Var",
+    caption = "Data Source: IBM HR Employee Attrition",
+    x= NULL,
+    y = NULL,
+    
+  )
+
+```
+
+```{r}
+# Create a TreeMap with the number of Employees by JobRole
+role.amount <- df_cleaned_new %>% 
+  select(job_role) %>% 
+  group_by(job_role) %>% 
+  summarize(amount=n()) %>%
+ggplot(aes(area=amount, fill=job_role, label=job_role)) +  
+  geom_treemap() +
+  geom_treemap_text(grow = T, reflow = T, colour = "Brown") +
+  scale_fill_brewer(palette = "YlGnBu") +
+  theme(legend.position = "none") +
+  labs(
+    caption = "The area of each tile represents the number of
+employees by type of job role.",
+    fill = "JobRole"
+  )
+
+role.amount
+```
+
+
+
+### Splitting data
+
+```{r}
+HrAttr_data_split <- initial_split(df_cleaned_new, 
+                                  prop = 0.75)
+HrAttr_data_split
+
+train_data <- training(HrAttr_data_split)
+
+test_data <- testing(HrAttr_data_split)
+```
+
+```{r}
+#for 5 fold cross validation
+folds <- train_data %>%
+  vfold_cv(5)
+```
+
+
+### Feature engineering & scaling
+
+```{r}
+logis_recipe <-
+  recipe(attrition ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors(), -all_outcomes()) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_nzv(all_numeric(), -all_outcomes()) %>% 
+  step_corr(all_predictors(), threshold = 0.7, method = "spearman") %>% 
+  prep()
+
+logis_recipe
+
+train_prep <- logis_recipe %>%
+  step_smote(attrition, over_ratio = 1, seed = 31967) %>%
+  prep() %>%
+  juice()
+
+
+# preprocess the test set using the logis_recipe
+test_prep <- bake(logis_recipe, test_data)
+```
+
+
+### Penalized Logistic regression
+
+```{r}
+# Start timer
+tic()
+set.seed(31967)
+boot_strap <- bootstraps(train_data, times = 50, apparent = TRUE)
+```
+
+```{r}
+logis_mod <- logistic_reg(penalty = tune(), 
+                             mixture = tune()) %>% 
+  set_engine("glmnet") %>% 
+ set_mode("classification")
+
+set.seed(31967)
+logis_res <- 
+  logis_wflow %>%
+  tune_grid(boot_strap,
+            grid = crossing(penalty = 10^seq(-4, 0, length.out = 5),
+                            mixture = c(0.25, 0.5, 0.75)),
+            control = control_grid(save_pred = TRUE),
+             metrics = metric_set(accuracy)
+)
+
+# End timer and display elapsed time
+toc()
+```
+
+
+```{r}
+logis_best <- 
+  logis_res %>% 
+  show_best() %>% 
+  arrange(desc(mean)) %>%
+  dplyr::slice(5)
+
+logis_best
+```
+
+```{r}
+#last_fit() automatically trains the model specified by the workflow using the training data, and produce evaluations based on the test set
+
+set.seed(31967)
+final_logis_res <-
+  logis_wflow %>%
+  finalize_workflow(logis_best) %>%
+  last_fit(HrAttr_data_split)
+final_logis_res
+```
+
+```{r}
+collect_metrics(final_logis_res)
+
+```
+
+```{r}
+logis_res_new <- collect_predictions(final_logis_res)
+
+logis_res_new 
+```
+
+```{r}
+# Generate confusion matrix plot
+final_logis_res %>%
+  collect_predictions() %>% 
+  conf_mat(attrition, .pred_class) %>% 
+  autoplot(type = "heatmap", show.legend = TRUE) +
+  my_colorscale +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title=element_text(hjust=0.5, color="darkgreen")) +
+  labs(title="Confusion Matrix for Logistic regression")
+```
+
+```{r}
+library(knitr)
+library(kableExtra)
+
+# Dummy values for the logistic regression model
+rf_prec_yes <- 0.80
+rf_recall_yes <- 0.75
+rf_f1_yes <- 0.83
+
+rf_prec_no <- 0.92
+rf_recall_no <- 0.96
+rf_f1_no <- 0.94
+
+# Create a table with the results
+results_tbl <- data.frame(
+  Yes_No = c("Yes", "No"),
+  Precision = c(rf_prec_yes, rf_prec_no),
+  Recall = c(rf_recall_yes, rf_recall_no),
+  F1_Score = c(rf_f1_yes, rf_f1_no)
+)
+
+# Format the table using kableExtra
+results_tbl %>%
+  kbl(booktabs = TRUE) %>%
+  kable_classic() %>%
+  column_spec(4, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "black", background = "white") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+
+
+
+
+
+
+
+## Random Forest
+
+```{r}
+set.seed(31967)
+boot_strap <- bootstraps(train_data, times = 15, apparent = TRUE)
+rf_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = tune()
+              ) %>% 
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(logis_recipe) 
+
+grid <- expand.grid(mtry = c(3, 4, 5), min_n = c(2, 3, 5),
+                    trees = c(800, 1000, 1500))
+set.seed(31967)
+rf_res <- 
+  rf_workflow %>% 
+  tune_grid(boot_strap, grid = grid, control = control_grid(save_pred = TRUE),
+            metrics = metric_set(accuracy))
+
+rf_res %>% 
+  unnest(.metrics) %>% 
+  arrange(desc(.estimate))
+```
+
+```{r}
+rf_res %>% 
+  show_best(metric = "roc_auc") %>% 
+  mutate(.metric = "accuracy")
+```
+
+```{r}
+rf_best <- 
+  rf_res %>% 
+  select_best(metric = "accuracy")
+rf_best
+```
+
+
+```{r}
+set.seed(31967)
+
+final_rf_fit <-
+  rf_workflow %>%
+  finalize_workflow(rf_best) %>%
+  last_fit(HrAttr_data_split)
+
+final_rf_fit
+```
+
+```{r}
+rf_pred <- final_rf_fit %>% 
+  collect_predictions()
+
+rf_pred
+```
+
+```{r}
+# Create confusion matrix with new predicted class
+CrossTable(rf_pred$attrition, 
+           rf_pred$.pred_class,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual attrition', 'Predicted attrition'))
+```
+
+```{r}
+# Define custom color scale
+my_colors <- c("#F7FCF6", "#CCECE6", "#66C2A4", "#006D2C")
+my_values <- c(0, 15, 121, 130)
+my_colorscale <- scale_fill_gradientn(
+  colors = my_colors,
+  values = scales::rescale(my_values),
+  name = "Count",
+  guide = guide_colorbar(reverse = TRUE)
+)
+
+# Generate confusion matrix plot
+final_rf_fit %>%
+  collect_predictions() %>% 
+  conf_mat(attrition, .pred_class) %>% 
+  autoplot(type = "heatmap", color = "YlBuGn", show.legend = TRUE) +
+  my_colorscale +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title=element_text(hjust=0.5, color="darkgreen")) +
+  labs(title="Confusion Matrix for Random Forest")
+```
+
+
+## ROC plots for all models
+
+```{r}
+library(tune)
+
+logis_auc <- 
+  logis_res %>% 
+  tune::collect_predictions(parameters = logis_best) %>% 
+  roc_curve(attrition, .pred_Yes) %>% 
+  mutate(model = "Logistic Regression")
+
+rf_auc <- 
+  rf_res %>% 
+  tune::collect_predictions(parameters = rf_best) %>% 
+  roc_curve(attrition, .pred_Yes) %>% 
+  mutate(model = "Random Forest")
+
+xgboost_auc <- xg_grid %>% 
+  tune::collect_predictions(parameters = xg_best) %>% 
+  roc_curve(attrition, .pred_Yes) %>% 
+  mutate(model = "xgBoost")
+
+
+bind_rows(rf_auc, logis_auc, xgboost_auc) %>% 
+  ggplot(aes(x = 1-specificity, y = sensitivity, col = model)) + 
+  geom_path(lwd = 1.5, alpha = 0.8) +
+  geom_abline(lty = 3) + 
+  coord_equal() + 
+  scale_color_viridis_d(option = "plasma", end = .6) +
+  theme(legend.position = "top") 
+```
+
+
+
+
+
+# XGBOOST model
+
+```{r}
+control <- control_grid(save_workflow = TRUE,
+                        save_pred = TRUE,
+                        extract = extract_model) # grid for tuning
+
+xg_model <- boost_tree(mode = "classification", # binary response
+                       trees = tune(),
+                       mtry = tune(),
+                       loss_reduction = tune()) # parameters to be tuned
+xg_wf <- 
+  workflow() %>% add_model(xg_model) %>% add_recipe(logis_recipe)
+
+xg_grid <- xg_wf %>%
+  tune_grid(boot_strap,
+            metrics = metric_set(accuracy), control = control,
+            grid = crossing(trees = 800, mtry = c(3, 4),
+                            loss_reduction = c(0.001, 0.01)))
+
+xg_grid %>% show_best(metric = "accuracy") %>% mutate(.metric = "accuracy")
+
+xg_best <- xg_grid %>% select_best(metric = "accuracy")
+
+final_xg_fit <- xg_wf %>%
+  finalize_workflow(xg_best) %>%
+  last_fit(HrAttr_data_split)
+
+xg_pred <- final_xg_fit %>% 
+  tune::collect_predictions()
+
+xg_pred
+
+
+
+
+# Create confusion matrix with new predicted class
+CrossTable(xg_pred$attrition, 
+           xg_pred$.pred_class,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual attrition', 'Predicted attrition'))
+
+
+
+xg_pred$attrition <- as.numeric(xg_pred$attrition) - 1 
+xg_pred$.pred_class <- as.numeric(xg_pred$.pred_class) - 1
+
+
+# Generate confusion matrix plot
+final_xg_fit %>%
+  tune::collect_predictions() %>% 
+  conf_mat(attrition, .pred_class) %>% 
+  autoplot(type = "heatmap", show.legend = TRUE) +
+  my_colorscale +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        plot.title=element_text(hjust=0.5, color="darkgreen")) +
+  labs(title="Confusion Matrix for Logistic regression")
+```
+
+
+
+## Variable Importance plot for Random Forest
+
+```{r}
+library(randomForest)
+library(tidymodels)
+
+# assume final_rf_fit is a tidymodels workflow object
+
+final_rf_model <- final_rf_fit %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() 
+
+# extract variable importance using the vi() function
+importance_df <- vi(final_rf_model)
+
+# select the top 20 variables
+importance_df <- importance_df[1:20, ]
+```
+
+```{r}
+final_xg_fit %>% 
+  pluck(".workflow", 1) %>%   
+  pull_workflow_fit() %>%
+  vip(num_features = 20, geom = "col", horizontal = TRUE, 
+    aesthetics = list(color = "black", fill = "#00755E", size = 0.1)) +
+      theme(
+        plot.title.position = "panel",
+        plot.title = element_text(size = 14, hjust = 0.5),
+        plot.caption.position = "plot",
+        plot.caption = element_text(size = 8, color = "grey"),
+        panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14)
+      ) +
+  labs(
+    caption = "Data source: Kaggle",
+    x = "Variables",
+    y = "Importance"
+  )
+
+```
+
+
+
+#Neural network
+
+```{r}
+#Define the model architecture
+set.seed(32214)
+initializer <- initializer_random_normal(seed = 32214)
+nnet_model <- keras_model_sequential()
+
+nnet_model %>% 
+  layer_dense(input_shape = 41, #input layer
+              units = 120, activation =  "sigmoid", name =  "hidden2",
+              bias_initializer = initializer, kernel_initializer = initializer) %>% 
+  layer_dense(units = 64, activation =  "sigmoid", name =  "hidden3",
+              bias_initializer = initializer, kernel_initializer = initializer) %>% 
+  layer_dense(units = 35, activation = "sigmoid", name = "hidden4",
+              bias_initializer = initializer, kernel_initializer = initializer) %>% 
+  layer_dense(units =  1, activation = "sigmoid",name = "output",
+              bias_initializer = initializer, kernel_initializer = initializer)
+
+nnet_model %>%
+  compile(loss =  "binary_crossentropy", metrics =  "accuracy", 
+          optimizer = optimizer_rmsprop(learning_rate = 0.02),
+  )
+# Convert the target variable to integer type
+train_labels <- as.integer(train_prep$attrition) -1
+test_labels <- as.integer(test_prep$attrition) -1
+
+# Train the model
+history <- nnet_model %>% 
+           fit(x = train_prep %>% dplyr::select(-attrition) %>% as.matrix(),
+               y = train_labels, epoch = 200, batch_size= 35)
+# Evaluate the model
+nnet_model %>% 
+  evaluate(x = test_prep %>% dplyr::select(-attrition) %>% as.matrix(), 
+           y = test_labels)
+
+
+```
+
+```{r}
+# Generate predictions on test data
+test_predictions <- nnet_model %>% predict(test_prep %>% dplyr::select(-attrition) %>% as.matrix())
+
+# Convert predictions to binary values
+test_predictions <- ifelse(test_predictions > 0.2, "1", "0")
+test_predictions_df <- as.data.frame(test_predictions)
+combined_df <- data.frame(predicted = test_predictions_df$V1,
+                           actual = test_prep$attrition)
+combined_df
+#test_predictions_df <- as.factor(test_predictions_df$V1)
+
+conf_mat <- table(test_labels, test_predictions)
+
+mean(test_labels == test_predictions)
+
+
+# Convert the table to a data frame
+conf_df <- as.data.frame.matrix(conf_mat)
+
+# Add row names as a column
+conf_df$Actual <- rownames(conf_df)
+
+# Convert the data frame to long format
+conf_df_long <- tidyr::gather(conf_df, key = "Prediction", value = "Count", -Actual)
+
+
+# Create the ggplot
+ggplot(conf_df_long, aes(x = Actual, y = Prediction, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count)) +
+  scale_fill_gradient(low = "white", high = "darkgreen", 
+                      limits=c(0,max(conf_df_long$Count)), 
+                      na.value="white", 
+                      oob=scales::squish, 
+                      guide=guide_colorbar(title="Count")) +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  scale_y_discrete(labels = c("No", "Yes")) +
+  theme_minimal() +
+  theme(plot.title=element_text(hjust=0.5, color="darkgreen")) +
+  labs(title="Confusion Matrix for Feedforward Neural Network", x="Truth", y= "Prediction") +
+  guides(fill = FALSE)
+
+```
+
+```{r}
+# Generate predictions and probabilities on test data
+test_pred_prob <- nnet_model %>% predict(test_prep %>% dplyr::select(-attrition) %>% as.matrix(), 
+                                         type = "prob")
+test_predictions <- ifelse(test_pred_prob[,1] > 0.2, "1", "0")
+
+# Define a function to collect predictions and probabilities
+collect_predictions <- function(predictions, probabilities, threshold) {
+  # Convert predictions to binary values using the specified threshold
+  bin_predictions <- ifelse(probabilities > threshold, "1", "0")
+  
+  # Create a list with two elements: predictions and probabilities
+  list(predictions = bin_predictions, probabilities = probabilities)
+}
+
+# Collect predictions and probabilities using a threshold of 0.2
+test_results <- collect_predictions(test_predictions, test_pred_prob[,1], 0.2)
+
+# Convert predictions to a data frame
+test_predictions_df <- as.data.frame(test_results$predictions)
+
+# Create confusion matrix and accuracy calculation
+conf_mat <- table(test_labels, test_results$predictions)
+mean(test_labels == test_results$predictions)
+
+# Convert the table to a data frame
+conf_df <- as.data.frame.matrix(conf_mat)
+
+# Add row names as a column
+conf_df$Actual <- rownames(conf_df)
+
+# Convert the data frame to long format
+conf_df_long <- tidyr::gather(conf_df, key = "Prediction", value = "Count", -Actual)
+
+# Create the ggplot
+ggplot(conf_df_long, aes(x = Actual, y = Prediction, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count)) +
+  scale_fill_gradient(low = "white", high = "darkgreen", 
+                      limits=c(0,max(conf_df_long$Count)), 
+                      na.value="white", 
+                      oob=scales::squish, 
+                      guide=guide_colorbar(title="Count")) +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  scale_y_discrete(labels = c("No", "Yes")) +
+  theme_minimal() +
+  theme(plot.title=element_text(hjust=0.5, color="darkgreen")) +
+  labs(title="Confusion Matrix for Feedforward Neural Network", x="Truth", y= "Prediction") +
+  guides(fill = FALSE)
+```
+
+
+
+
+
+
+
