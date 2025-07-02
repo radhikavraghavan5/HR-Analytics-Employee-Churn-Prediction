@@ -1,4 +1,4 @@
-# HR-Analytics-Employee-Attrition-prediction
+# HR-Analytics-Employee-Churn-prediction
 
 
 
